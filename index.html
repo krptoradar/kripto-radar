@@ -99,6 +99,7 @@ input[type=checkbox]{width:auto;margin-right:6px}
 <main>
   <!-- PANEL -->
   <section id="s-panel" class="act">
+    <div id="trendCard"></div>
     <div id="corrNote"></div>
     <div id="cards"></div>
     <div class="card warn sm">Sinyaller veriye dayalı bir puanlamadır, kesin tahmin değildir. Yatırım tavsiyesi değildir; kaybetmeyi göze alamayacağın parayla işlem yapma. Uygulama hiçbir emir göndermez.</div>
@@ -859,6 +860,42 @@ function corrNote(){
     if(avg!==null&&avg>=0.6)out.push(`<b>${PROF[k].name}:</b> ${g.map(a=>esc(a.p.split('/')[0])).join(', ')} aynı anda <b>${d>0?'AL':'SAT'}</b> veriyor ve BTC ile ortalama %${Math.round(avg*100)} birlikte hareket ediyorlar. Bunlar ayrı fırsatlar değil, büyük ölçüde aynı bahis; hepsine birden girmek riski katlar.`)}
   return out.length?`<div class="card warn sm">⚠️ ${out.join('<br>')}</div>`:'';
 }
+
+/* ===== UZUN VADE: günlük trend takibi (2 yıllık testte maliyet sonrası kârlı) =====
+   Giriş: günlük kapanış önceki 20 günün zirvesini geçer + BTC 50 ve 200 günlük ortalamanın üstünde + coin 50 günlük ortalamanın üstünde ve ortalama yükseliyor.
+   Stop: giriş − 2×ATR; sonra en yüksek kapanış − 3×ATR (yalnız yukarı). Hedef yok. */
+const TRD={N:20,stopK:2,trailK:3,sma:50,rise:10};S.trend={};S.trendTs=0;
+function smaA(c,n){const o=new Array(c.length).fill(NaN);let s=0;for(let i=0;i<c.length;i++){s+=c[i];if(i>=n)s-=c[i-n];if(i>=n-1)o[i]=s/n}return o}
+function trendEval(cd,btc){const n=TRD.N;if(!cd||cd.length<72||!btc||btc.length<201)return{ok:false};
+  const h=cd.map(x=>x.h),l=cd.map(x=>x.l),c=cd.map(x=>x.c),a=atrArr(h,l,c),m=smaA(c,TRD.sma),i=c.length-1;
+  const hhPrev=Math.max(...h.slice(i-n,i)),hhNext=Math.max(...h.slice(i-n+1,i+1));
+  let bi=-1;for(let j=btc.length-1;j>=0;j--)if(btc[j].t<=cd[i].t){bi=j;break}
+  const bc=btc.map(x=>x.c),b50=smaA(bc,50),b200=smaA(bc,200),btcOk=bi>=200&&bc[bi]>b50[bi]&&bc[bi]>b200[bi];
+  const coinOk=c[i]>m[i]&&m[i]>m[i-TRD.rise],brk=c[i]>hhPrev;
+  return{ok:true,t:cd[i].t,close:c[i],atr:a[i],level:hhNext,dist:(hhNext-c[i])/c[i],btcOk,coinOk,signal:brk&&btcOk&&coinOk,stopIf:c[i]-TRD.stopK*a[i],cd,a}}
+function trendTrail(ev,pos){const since=ev.cd.filter(x=>x.t+864e5>pos.t);const atrE=ev.a[Math.max(0,ev.cd.findIndex(x=>x.t+864e5>pos.t)-1)]||ev.atr;
+  let stop=pos.entry-TRD.stopK*atrE;if(since.length)stop=Math.max(stop,Math.max(...since.map(x=>x.c))-TRD.trailK*ev.atr);return stop}
+async function loadTrend(force){const now=Date.now();if(!force&&now-S.trendTs<9e5)return;S.trendTs=now;
+  const cl=cd=>cd&&cd.filter(x=>x.t+864e5<=now);const b=await fetchCandles('BTC/USDT','1d',400);const btc=b&&cl(b.cd);
+  for(const p of CFG.pairs){try{const r=await fetchCandles(p,'1d',400);const ev=trendEval(r&&cl(r.cd),btc);const old=S.trend[p];S.trend[p]=ev;
+    if(ev.signal&&!(CFG.trendPos||{})[p]&&(!old||old.t!==ev.t)&&now-(ev.t+864e5)<36*36e5){const key='trend:'+p+':'+ev.t;
+      if(!LS.get(key,0)){LS.set(key,1);addEvent(p,'','signal',`Uzun vade AL: günlük kapanış ${fmtP(ev.close)} 20 günlük zirveyi geçti · önerilen stop ${fmtP(ev.stopIf)}`);
+        if(CFG.notify&&'Notification'in window&&Notification.permission==='granted'){try{new Notification('Kripto Radar: '+p,{body:`Uzun vade AL · stop ${fmtP(ev.stopIf)}`})}catch(e){}}}}}catch(e){}}
+  renderTrend()}
+function renderTrend(){const box=$('#trendCard');if(!box)return;const ps=CFG.pairs;const T=S.trend;CFG.trendPos=CFG.trendPos||{};
+  const any=ps.map(p=>T[p]).find(x=>x&&x.ok);const ok=v=>v?'<span class="g">✓</span>':'<span class="r">✗</span>';
+  const rows=ps.map(p=>{const t=T[p];if(!t)return`<tr><td><b>${esc(p)}</b></td><td colspan="4" class="mut">yükleniyor…</td></tr>`;if(!t.ok)return`<tr><td><b>${esc(p)}</b></td><td colspan="4" class="mut">yeterli günlük veri yok</td></tr>`;
+    const pos=CFG.trendPos[p],live=P(p).sig&&P(p).sig.live;
+    if(pos){const st=trendTrail(t,pos),r=live?(live-pos.entry)/pos.entry:null,hit=live&&live<=st;
+      return`<tr><td><b>${esc(p)}</b></td><td><span class="badge ${hit?'S1':'L2'}">${hit?'STOP — SAT':'Pozisyonda'}</span><div class="xs mut">giriş ${fmtP(pos.entry)}${r!=null?` · <span class="${r>=0?'g':'r'}">${r>=0?'+':''}${(r*100).toFixed(1)}%</span>`:''}</div></td><td>–</td><td class="r"><b>${fmtP(st)}</b><div class="xs mut">iz süren stop</div></td><td><button class="btn sm" data-tsell="${esc(p)}">Sattım</button></td></tr>`}
+    const stt=t.signal?'<span class="badge L1">AL sinyali</span>':(t.btcOk&&t.coinOk)?'<span class="badge L0">Kırılım bekleniyor</span>':`<span class="mut sm">Bekle · ${[!t.btcOk&&'BTC trendi aşağı',!t.coinOk&&'coin trendi zayıf'].filter(Boolean).join(', ')}</span>`;
+    return`<tr><td><b>${esc(p)}</b></td><td>${stt}</td><td>${fmtP(t.level)}<div class="xs mut">${t.dist>0?'%'+(t.dist*100).toFixed(1)+' yukarıda':'geçildi'}</div></td><td class="mut">${fmtP(t.stopIf)}<div class="xs">alırsan stop</div></td><td><button class="btn sm" data-tbuy="${esc(p)}">Aldım</button></td></tr>`}).join('');
+  box.innerHTML=`<div class="card"><div class="row"><b style="font-size:16px">Uzun vade — trend takibi</b><span class="xs mut">BTC trendi ${any?ok(any.btcOk):'–'}</span></div>
+    <div class="xs mut" style="margin:4px 0 8px">Günlük kapanış <b>kırılım seviyesini</b> geçerse ve BTC ile coin trendi yukarıysa AL. Stop fiyat yükseldikçe yukarı taşınır, hedef yok. 2 yıllık testte işlem maliyetleri düşüldükten sonra kârlı; kazanma oranı ~%50, zararlar küçük, kazançlar büyük. Aldıysan “Aldım”a bas; stopunu sistem takip etsin. BTC trendi aşağıyken sistem işlem önermez — bu, düşüşlerden korunmanın parçası.</div>
+    <div style="overflow-x:auto"><table><tr><th>Coin</th><th>Durum</th><th>Kırılım seviyesi</th><th>Stop</th><th></th></tr>${rows}</table></div></div>`;
+  box.onclick=e=>{const b=e.target.closest('[data-tbuy]'),sl=e.target.closest('[data-tsell]');
+    if(b){const p=b.dataset.tbuy,live=P(p).sig&&P(p).sig.live,v=prompt(`${p} alış fiyatın:`,live?String(+live.toPrecision(6)):'');const e2=parseFloat(String(v||'').replace(',','.'));if(!(e2>0))return;CFG.trendPos[p]={entry:e2,t:Date.now()};LS.set('kr_cfg',CFG);renderTrend()}
+    if(sl){delete CFG.trendPos[sl.dataset.tsell];LS.set('kr_cfg',CFG);renderTrend()}}}
 function renderCards(){
   const box=$('#cards');$('#corrNote').innerHTML=corrNote();
   if(!CFG.pairs.length){box.innerHTML='<div class="card empty">Ayarlar\'dan takip etmek istediğin çiftleri ekle.</div>';return}
@@ -972,14 +1009,14 @@ $('#cfgSave').onclick=()=>{CFG.view=$('#cfgView').value;CFG.whaleUSD=Math.max(10
   saveCfg(true);toast('Kaydedildi');beep(true)};
 $('#askNotif').onclick=async()=>{if(!('Notification'in window))return toast('Bu tarayıcı bildirimi desteklemiyor');try{const r=await Notification.requestPermission();toast(r==='granted'?'Bildirimler açık':'Bildirim izni verilmedi')}catch(e){toast('Bildirim izni alınamadı')}};
 $('#simRun').onclick=runSim;$('#simProf').onchange=()=>{const k=$('#simProf').value,A=atrK(k);$('#simH').value=PROF[k].H;$('#simStop').value=A.s;$('#simTgt').value=A.t};$('#newsRefresh').onclick=fetchNews;
-function saveCfg(restart){LS.set('kr_cfg',CFG);renderChips();renderSettings();if(restart){restartFeeds();refreshCandles()}render()}
+function saveCfg(restart){setTimeout(()=>loadTrend(true),500);LS.set('kr_cfg',CFG);renderChips();renderSettings();if(restart){restartFeeds();refreshCandles()}render()}
 
 /* ============ başlat ============ */
 function tick(){const now=Date.now();for(const p of CFG.pairs){analyzeFlow(p);computeSignal(p);const st=P(p);
   for(const k of PK){const ps=st.ps[k];if(!ps.cd||!ps.ind)continue;const want=STDIR[ps.state]||(ps.sm>=0?1:-1);
     if(!ps.prob||ps.prob.dir!==want||now-(ps.probTs||0)>PROF[k].refresh)quickProb(p,k)}}render()}
 renderChips();renderSettings();loadFx();restartFeeds();refreshCandles();fetchNews();setInterval(loadFx,3600000);
-setInterval(tick,2000);setInterval(refreshCandles,60000);setInterval(fetchNews,180000);
+setInterval(tick,2000);setInterval(refreshCandles,60000);loadTrend(true);setInterval(()=>loadTrend(),60000);setInterval(renderTrend,10000);setInterval(fetchNews,180000);
 </script>
 </body>
 </html>
