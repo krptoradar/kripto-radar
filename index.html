@@ -663,12 +663,12 @@ function computeProfile(pair,k,shared,live){
     if(now-ps.candSince>=(weaker?pf.confirm/3:pf.confirm))setState(pair,k,tgt)}
   ps.sig={raw,comp,reg,wts,htfNote};
   /* simülasyon onayı: maliyetler düşüldükten sonra beklenen sonuç artı değilse işlem sinyali verilmez */
-  const d=STDIR[ps.state];ps.gate=!!(d&&ps.prob&&ps.prob.dir===d&&ps.prob.evR>0.02);
+  const d=STDIR[ps.state];ps.gate=!!(d&&ps.prob&&ps.prob.dir===d&&ps.prob.evR>GATE);
   if(d&&ps.gate&&!ps.wasGated&&Date.now()-S.start>60000){if(journalOpen(pair,k,true))signalAlert(pair,k,ps.state,ps.sm,ps.prob)}
   ps.wasGated=ps.gate;
 }
 function setState(pair,k,ns){const st=P(pair),ps=st.ps[k],od=STDIR[ps.state],nd=STDIR[ns];ps.state=ns;ps.cand=null;ps.stateSince=Date.now();
-  if(nd&&nd!==od){quickProb(pair,k);const g=!!(ps.prob&&ps.prob.dir===nd&&ps.prob.evR>0.02);ps.gate=g;ps.wasGated=g;
+  if(nd&&nd!==od){quickProb(pair,k);const g=!!(ps.prob&&ps.prob.dir===nd&&ps.prob.evR>GATE);ps.gate=g;ps.wasGated=g;
     if(Date.now()-S.start>60000&&ps.ind){const opened=journalOpen(pair,k,g);if(opened&&g)signalAlert(pair,k,ns,ps.sm,ps.prob)}}}
 function signalAlert(pair,k,label,score,pr){
   const key=pair+k,now=Date.now();if(S.lastNotif[key]&&now-S.lastNotif[key]<600000)return;S.lastNotif[key]=now;
@@ -685,6 +685,9 @@ function quickProb(pair,k){
   try{ps.prob=simulate(ps.cd,{dir,entry:e,atr,stopATR:atrK(k).s,targetATR:atrK(k).t,H:pf.H,N:1500,seed:7,cost:costR(e,atrK(k).s*atr)});ps.probTs=Date.now()}catch(e2){ps.prob=null}
 }
 
+/* simülasyon eşiği: 2 yıllık testte 0,15 üstü onaylı sinyaller iki dönemde de artıda kaldı */
+const GATE=0.15;
+const PNAME=k=>k==='long'?'Uzun vade':PROF[k]?PROF[k].name:'eski';
 /* ============ sinyal karnesi ============ */
 let J=LS.get('kr_journal',[]);if(!Array.isArray(J))J=[];
 function saveJ(){LS.set('kr_journal',J)}
@@ -699,12 +702,12 @@ function journalOpen(pair,k,gated){
     corr:ps.corr!=null?+ps.corr.toFixed(2):null,comp:Object.fromEntries(Object.entries(sig.comp).map(([c,v])=>[c,+v.toFixed(2)])),hi:e,lo:e,c:+costR(e,sd).toFixed(4)});
   if(J.length>800)J.length=800;saveJ();return true;
 }
-function closeJ(j,res,px){j.res=res;j.exit=px;j.ets=Date.now();const R=res==='hedef'?j.rr:res==='stop'?-1:j.dir*(px-j.entry)/j.sd;j.R=+(R-j.c).toFixed(3);saveJ()}
-function journalTick(pair,px){for(const j of J){if(j.res||j.pair!==pair)continue;j.hi=Math.max(j.hi,px);j.lo=Math.min(j.lo,px);
-  const hs=j.dir>0?j.lo<=j.stop:j.hi>=j.stop,ht=j.dir>0?j.hi>=j.target:j.lo<=j.target;
+function closeJ(j,res,px){j.res=res;j.exit=px;j.ets=Date.now();const R=res==='hedef'?j.rr:res==='stop'?j.dir*(j.stop-j.entry)/j.sd:j.dir*(px-j.entry)/j.sd;j.R=+(R-j.c).toFixed(3);saveJ()}
+function journalTick(pair,px){for(const j of J){if(j.res||j.pair!==pair)continue;if(j.prof==='long'){if(px<=j.stop)closeJ(j,'stop',j.stop);continue}j.hi=Math.max(j.hi,px);j.lo=Math.min(j.lo,px);
+  const hs=j.dir>0?j.lo<=j.stop:j.hi>=j.stop,ht=j.target!=null&&(j.dir>0?j.hi>=j.target:j.lo<=j.target);
   if(hs)closeJ(j,'stop',j.stop);else if(ht)closeJ(j,'hedef',j.target);else if(Date.now()>=j.exp)closeJ(j,'süre',px)}}
 /* uygulama kapalıyken geçen süreyi mumlardan tamamla (aynı mumda ikisi de değdiyse stop sayılır) */
-function journalCatchUp(pair,k){const cd=P(pair).ps[k].cd;if(!cd)return;for(const j of J){if(j.res||j.pair!==pair||j.tf!==PROF[k].tf||(j.prof&&j.prof!==k))continue;
+function journalCatchUp(pair,k){const cd=P(pair).ps[k].cd;if(!cd)return;for(const j of J){if(j.res||j.pair!==pair||j.prof==='long'||j.tf!==PROF[k].tf||(j.prof&&j.prof!==k))continue;
   for(const b of cd){if(b.t<j.ts)continue;if(b.t>=j.exp){closeJ(j,'süre',b.o);break}
     const hs=j.dir>0?b.l<=j.stop:b.h>=j.stop,ht=j.dir>0?b.h>=j.target:b.l<=j.target;if(hs){closeJ(j,'stop',j.stop);break}if(ht){closeJ(j,'hedef',j.target);break}}}}
 function jStats(a){const n=a.length;if(!n)return null;const g=a.filter(j=>j.R>0),gp=g.reduce((s,j)=>s+j.R,0),gl=-a.filter(j=>j.R<0).reduce((s,j)=>s+j.R,0),sum=a.reduce((s,j)=>s+j.R,0);
@@ -714,6 +717,10 @@ function renderKarne(){
   const done=J.filter(j=>j.res),open=J.filter(j=>!j.res),all=jStats(done.filter(j=>j.gated!==false));
   let h='';
   if(!J.length){$('#karne').innerHTML='<div class="card empty">Henüz kayıtlı sinyal yok. Uygulama açık kaldıkça her AL/SAT sinyalini buraya kaydedip sonucunu otomatik ölçecek.</div>';return}
+  {const box=(k,nm,desc)=>{const a=done.filter(j=>j.prof===k&&j.gated!==false),s2=jStats(a),op=open.filter(j=>j.prof===k&&j.gated!==false).length;
+      return`<div class="stat" style="text-align:left"><b>${nm}</b><div class="xs mut">${desc}</div>${s2?`<div class="big ${s2.avg>=0?'g':'r'}" style="margin-top:4px">${s2.avg>=0?'+':''}${s2.avg.toFixed(2)}R</div><div class="xs">sinyal başına · ${s2.n} kapanan · kazanma ${pct(s2.win,0)}</div><div class="xs">toplam <b class="${s2.sum>=0?'g':'r'}">${s2.sum>=0?'+':''}${s2.sum.toFixed(1)}R</b>${op?` · ${op} açık`:''}</div>${s2.n<30?'<div class="xs y">30 sinyalden az; karar için erken</div>':''}`:`<div class="sm mut" style="margin-top:6px">Henüz kapanmış sinyal yok${op?` · ${op} açık`:''}</div>`}</div>`};
+    h+=`<div class="card"><b>Vadelere göre karne</b> <span class="xs mut">(yalnız onaylı işlem sinyalleri, maliyetler düşülmüş)</span><div class="f3" style="margin-top:8px">
+      ${box('short','Kısa vade','5 dk mumlar · saatler · deneysel')}${box('mid','Orta vade','1 saatlik mumlar · 1-2 gün')}${box('long','Uzun vade','günlük trend · haftalar')}</div></div>`}
   h+=`<div class="card"><b>Genel karne: işlem sinyalleri</b> <span class="xs mut">(simülasyonun onayladığı sinyaller, maliyetler düşülmüş)</span>`;
   if(all){h+=`<div class="f3" style="margin-top:8px"><div class="stat"><div class="xs mut">Kapanan sinyal</div><div class="big">${all.n}</div></div><div class="stat"><div class="xs mut">Kazanma oranı</div><div class="big">${pct(all.win,0)}</div></div><div class="stat"><div class="xs mut">Sinyal başına</div><div class="big ${all.avg>=0?'g':'r'}">${all.avg>=0?'+':''}${all.avg.toFixed(2)}R</div></div></div>
     <div class="sm" style="margin-top:8px">Toplam <b class="${all.sum>=0?'g':'r'}">${all.sum>=0?'+':''}${all.sum.toFixed(1)}R</b>${all.pf?` · kâr faktörü ${all.pf.toFixed(2)}`:''}. 1R = stopta kaybedilecek tutar.</div>`;
@@ -724,7 +731,7 @@ function renderKarne(){
     const grp=(f,names)=>Object.entries(names).map(([k,n])=>statRow(n,jStats(done.filter(j=>f(j)===k)))).join('');
     h+=`<div class="card"><b>Neyin işe yaradığı</b><table style="margin-top:6px"><tr><th></th><th>Adet</th><th>Kazanma</th><th>Ort.</th><th>Toplam</th></tr>
       ${grp(j=>j.gated===false?'u':'g',{g:'Simülasyon onaylı',u:'Onaysız (sadece eğilim)'})}
-      ${grp(j=>j.prof||'old',{short:'Kısa vade',mid:'Orta vade',old:'Eski sürüm (15 dk)'})}
+      ${grp(j=>j.prof||'old',{short:'Kısa vade',mid:'Orta vade',long:'Uzun vade (trend)',old:'Eski sürüm (15 dk)'})}
       ${grp(j=>j.label.startsWith('GÜÇLÜ')?'s':'n',{s:'Güçlü sinyaller',n:'Normal sinyaller'})}
       ${grp(j=>j.corr==null?'x':j.corr>=0.7?'h':'l',{h:'BTC ile yüksek korelasyonlu',l:'BTC ile düşük korelasyonlu'})}
       ${grp(j=>j.dir>0?'l':'s',{l:'AL (long)',s:'SAT (short)'})}
@@ -737,9 +744,9 @@ function renderKarne(){
     h+=`<div class="card"><b>Bileşen karnesi</b><div class="xs mut">Bileşen sinyalle aynı yönü gösterdiğinde ve ters yönü gösterdiğinde sinyaller ortalama ne kazandırdı?</div><table style="margin-top:6px"><tr><th>Bileşen</th><th>Aynı yön</th><th>Ters yön</th><th>Sonuç</th></tr>${rows}</table></div>`;
   }
   if(open.length)h+=`<div class="card"><b>Açık sinyaller</b>${open.map(j=>{const px=P(j.pair).sig&&P(j.pair).sig.live;const u=px?j.dir*(px-j.entry)/j.sd-j.c:null;
-    return`<div class="ev"><span class="t">${tm(j.ts)}</span><div><b>${esc(j.pair)}</b> <span class="tag">${j.prof?PROF[j.prof].name:'eski'}</span><span class="tag ${j.dir>0?'pos':'neg'}">${j.label}</span>${j.gated===false?'<span class="tag">onaysız</span>':''} giriş ${fmtP(j.entry)} · stop ${fmtP(j.stop)} · hedef ${fmtP(j.target)}<br><span class="mut">Şu an</span> <b class="${u>=0?'g':'r'}">${u===null?'–':(u>=0?'+':'')+u.toFixed(2)+'R'}</b> <span class="mut">· bitiş ${new Date(j.exp).toLocaleString('tr-TR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span></div></div>`}).join('')}</div>`;
+    return`<div class="ev"><span class="t">${tm(j.ts)}</span><div><b>${esc(j.pair)}</b> <span class="tag">${PNAME(j.prof)}</span><span class="tag ${j.dir>0?'pos':'neg'}">${j.label}</span>${j.gated===false?'<span class="tag">onaysız</span>':''} giriş ${fmtP(j.entry)} · stop ${fmtP(j.stop)} · hedef ${j.target==null?'iz süren stop':fmtP(j.target)}<br><span class="mut">Şu an</span> <b class="${u>=0?'g':'r'}">${u===null?'–':(u>=0?'+':'')+u.toFixed(2)+'R'}</b> <span class="mut">· bitiş ${new Date(j.exp).toLocaleString('tr-TR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span></div></div>`}).join('')}</div>`;
   const RN={hedef:'✅ Hedef',stop:'❌ Stop',süre:'⏱ Süre doldu',ters:'↔ Ters sinyal'};
-  if(done.length)h+=`<div class="card"><b>Son kapanan sinyaller</b>${done.slice(0,40).map(j=>`<div class="ev"><span class="t">${new Date(j.ts).toLocaleString('tr-TR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span><div><b>${esc(j.pair)}</b> <span class="tag">${j.prof?PROF[j.prof].name:'eski'}</span><span class="tag ${j.dir>0?'pos':'neg'}">${j.label}</span>${j.gated===false?'<span class="tag">onaysız</span>':''} ${RN[j.res]||j.res} <b class="${j.R>=0?'g':'r'}">${j.R>=0?'+':''}${j.R.toFixed(2)}R</b><br><span class="mut">${REGN[j.reg]||''}${j.htf==='conflict'?' · büyük zaman dilimine ters':''} · puan ${j.score}</span></div></div>`).join('')}</div>`;
+  if(done.length)h+=`<div class="card"><b>Son kapanan sinyaller</b>${done.slice(0,40).map(j=>`<div class="ev"><span class="t">${new Date(j.ts).toLocaleString('tr-TR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span><div><b>${esc(j.pair)}</b> <span class="tag">${PNAME(j.prof)}</span><span class="tag ${j.dir>0?'pos':'neg'}">${j.label}</span>${j.gated===false?'<span class="tag">onaysız</span>':''} ${RN[j.res]||j.res} <b class="${j.R>=0?'g':'r'}">${j.R>=0?'+':''}${j.R.toFixed(2)}R</b><br><span class="mut">${REGN[j.reg]||''}${j.htf==='conflict'?' · büyük zaman dilimine ters':''} · puan ${j.score}</span></div></div>`).join('')}</div>`;
   h+=`<div class="card"><div class="f2"><button class="btn sec" id="jCopy">Karneyi kopyala</button><button class="btn sec" id="jReset">Karneyi sıfırla</button></div><div class="xs mut" style="margin-top:6px">Birkaç gün sonra karneyi kopyalayıp bana gönder; ağırlıkları gerçek sonuçlara göre birlikte ayarlarız. Karne bu tarayıcıda saklanır.</div></div>`;
   $('#karne').innerHTML=h;
   $('#jCopy').onclick=async()=>{try{await navigator.clipboard.writeText(JSON.stringify({v:4,cfg:{prof:PROF,atr:{short:atrK('short'),mid:atrK('mid')},fee:CFG.fee,slip:CFG.slip},journal:J}));toast('Karne panoya kopyalandı')}catch(e){toast('Kopyalanamadı')}};
@@ -878,10 +885,23 @@ function trendTrail(ev,pos){const since=ev.cd.filter(x=>x.t+864e5>pos.t);const a
 async function loadTrend(force){const now=Date.now();if(!force&&now-S.trendTs<9e5)return;S.trendTs=now;
   const cl=cd=>cd&&cd.filter(x=>x.t+864e5<=now);const b=await fetchCandles('BTC/USDT','1d',400);const btc=b&&cl(b.cd);
   for(const p of CFG.pairs){try{const r=await fetchCandles(p,'1d',400);const ev=trendEval(r&&cl(r.cd),btc);const old=S.trend[p];S.trend[p]=ev;
+    if(ev.ok)trendJournal(p,ev);
     if(ev.signal&&!(CFG.trendPos||{})[p]&&(!old||old.t!==ev.t)&&now-(ev.t+864e5)<36*36e5){const key='trend:'+p+':'+ev.t;
       if(!LS.get(key,0)){LS.set(key,1);addEvent(p,'','signal',`Uzun vade AL: günlük kapanış ${fmtP(ev.close)} 20 günlük zirveyi geçti · önerilen stop ${fmtP(ev.stopIf)}`);
         if(CFG.notify&&'Notification'in window&&Notification.permission==='granted'){try{new Notification('Kripto Radar: '+p,{body:`Uzun vade AL · stop ${fmtP(ev.stopIf)}`})}catch(e){}}}}}catch(e){}}
   renderTrend()}
+function trendJournal(p,ev){
+  /* açık uzun vade sinyalleri: kapanan günlük mumlarla stopu güncelle / stop olduysa kapat */
+  for(const j of J){if(j.res||j.pair!==p||j.prof!=='long')continue;
+    for(const b of ev.cd){if(b.t+864e5<=j.ts)continue;if(b.l<=j.stop){closeJ(j,'stop',j.stop);break}
+      j.best=Math.max(j.best||j.entry,b.c);j.stop=Math.max(j.stop,j.best-TRD.trailK*ev.atr)}j.hi=Math.max(j.hi,j.best||j.entry)}
+  /* yeni sinyal: aynı mum için bir kez */
+  if(ev.signal&&Date.now()-(ev.t+864e5)<36*36e5&&!J.some(j=>j.prof==='long'&&j.pair===p&&(!j.res||j.sigT===ev.t))){
+    const live=(P(p).sig&&P(p).sig.live)||ev.close,sd=TRD.stopK*ev.atr;
+    J.unshift({id:Date.now()+'-'+p+'-long',pair:p,prof:'long',dir:1,ts:Date.now(),sigT:ev.t,tf:'1d',entry:live,stop:live-sd,target:null,sd,rr:null,
+      exp:Date.now()+3650*864e5,score:0,label:'AL',reg:'trend',htf:'aligned',gated:true,ev:null,corr:null,comp:{},hi:live,lo:live,best:live,c:+costR(live,sd).toFixed(4)});
+    if(J.length>800)J.length=800}
+  saveJ()}
 function renderTrend(){const box=$('#trendCard');if(!box)return;const ps=CFG.pairs;const T=S.trend;CFG.trendPos=CFG.trendPos||{};
   const any=ps.map(p=>T[p]).find(x=>x&&x.ok);const ok=v=>v?'<span class="g">✓</span>':'<span class="r">✗</span>';
   const rows=ps.map(p=>{const t=T[p];if(!t)return`<tr><td><b>${esc(p)}</b></td><td colspan="4" class="mut">yükleniyor…</td></tr>`;if(!t.ok)return`<tr><td><b>${esc(p)}</b></td><td colspan="4" class="mut">yeterli günlük veri yok</td></tr>`;
